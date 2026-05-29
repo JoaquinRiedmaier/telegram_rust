@@ -12,19 +12,16 @@ async fn bateria(bot: Bot, chat: ChatId) {
     let ruta = "/sys/class/power_supply/AC/online";
     loop {
         let archivo = fs::read_to_string(ruta).expect("No se pudo leer el estado de la batería");
-        let nueva_lectura = archivo.trim() == "0";
-        log::info!("Bucle 5 segundos, nueva_lectura: {}", nueva_lectura);
+        let nueva_lectura = archivo.trim() == "1";
         if estado_anterior != nueva_lectura {
-            log::info!("Detectado cambio en el estado de la batería");
             estado_anterior = nueva_lectura;
             if nueva_lectura {
                 bot.send_message(chat, "Volvio la luz").await.unwrap();
             } else {
                 bot.send_message(chat, "Se cortó la luz").await.unwrap();
-                log::info!("Falla envio");
             }
         }
-        time::sleep(time::Duration::from_secs(5)).await
+        time::sleep(time::Duration::from_secs(10)).await
     }
 }
 
@@ -47,6 +44,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bot.send_message(chat, "El bot ha iniciado correctamente")
         .await?;
     tokio::spawn(bateria(bot.clone(), chat.clone()));
-    std::future::pending::<()>().await;
+    std::future::pending::<()>().await; // Provisorio para el ciclo
     Ok(())
 }
