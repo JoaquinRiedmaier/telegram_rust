@@ -2,12 +2,21 @@ use dotenvy::dotenv;
 use std::env; //Para archivo .env
 use std::fs;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use teloxide::prelude::*;
 use teloxide::repls::CommandReplExt;
 use teloxide::utils::command::BotCommands; // Agora sim, le vamos a mandar mensajitos
 use tokio::io::{AsyncBufReadExt, BufReader}; // Para leer línea por línea
 use tokio::process::Command;
 use tokio::time;
+
+static SYNCTHING_SERVICE: OnceLock<String> = OnceLock::new();
+
+fn get_syncthing_service() -> &'static str {
+    SYNCTHING_SERVICE.get_or_init(|| {
+        env::var("SYNCTHING").expect("Problema con la variable de entorno SYNCTHING")
+    })
+}
 
 // Para cada servicio, ejecuta el comando y actualiza el payload
 async fn chequeo_servicio(
@@ -106,7 +115,7 @@ async fn inicio(bot: Bot, chat: ChatId) {
     let mut payload = String::from("Estado de servicios:\n");
     let status = chequeo_servicio(
         "syncthing",
-        &["is-active", "syncthing-malevolo.service"].as_slice(),
+        &["is-active", get_syncthing_service()].as_slice(),
     )
     .await;
     payload.push_str(&status.unwrap_or_default());
@@ -172,11 +181,7 @@ async fn answer(bot: Bot, msg: Message, cmd: MisComandos) -> ResponseResult<()> 
     let mut payload = String::from("Estado de servicios:\n");
     match cmd {
         MisComandos::Estado => {
-            let status = chequeo_servicio(
-                "syncthing",
-                &["is-active", "syncthing-malevolo.service"].as_slice(),
-            )
-            .await;
+            let status = chequeo_servicio("syncthing", &["is-active", get_syncthing_service()].as_slice()).await;
             payload.push_str(&status.unwrap_or_default());
             let output = Command::new("tailscale")
                 .arg("status")
@@ -200,18 +205,14 @@ async fn answer(bot: Bot, msg: Message, cmd: MisComandos) -> ResponseResult<()> 
             }
         }
         MisComandos::PararSyncthing => {
-            let status = chequeo_servicio(
-                "syncthing",
-                &["is-active", "syncthing-malevolo.service"].as_slice(),
-            )
-            .await;
+            let status = chequeo_servicio("syncthing", &["is-active", get_syncthing_service()].as_slice()).await;
             match status {
                 Ok(status) => {
                     if status.contains("Corriendo") {
                         log::info!("Detecta que corre");
                         // Detener el servicio
                         let child = Command::new("sudo")
-                            .args(&["systemctl", "stop", "syncthing-malevolo.service"])
+                            .args(&["systemctl", "stop", get_syncthing_service()])
                             .stdout(Stdio::piped())
                             .status()
                             .await
@@ -230,15 +231,15 @@ async fn answer(bot: Bot, msg: Message, cmd: MisComandos) -> ResponseResult<()> 
         MisComandos::ArrancarSyncthing => {
             let status = chequeo_servicio(
                 "syncthing",
-                &["is-active", "syncthing-malevolo.service"].as_slice(),
+                &["is-active", get_syncthing_service()].as_slice(),
             )
             .await;
             match status {
                 Ok(status) => {
-                    if status.contains("No se ejecuta") {
+                    if status.contains("Parado") {
                         // Arrancar el servicio
                         let child = Command::new("sudo")
-                            .args(&["systemctl", "start", "syncthing-malevolo.service"])
+                            .args(&["systemctl", "start", get_syncthing_service()])
                             .stdout(Stdio::piped())
                             .status()
                             .await
