@@ -1,14 +1,28 @@
+mod db;
+mod reminders;
+
 use dotenvy::dotenv;
 use std::env; //Para archivo .env
 use std::fs;
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex;
 use teloxide::prelude::*;
-use teloxide::repls::CommandReplExt;
 use teloxide::utils::command::BotCommands; // Agora sim, le vamos a mandar mensajitos
 use tokio::io::{AsyncBufReadExt, BufReader}; // Para leer línea por línea
 use tokio::process::Command;
 use tokio::time;
+
+/// Valida "HH:MM" en 24h sin depender de la crate `regex`.
+fn validar_hora(hora: &str) -> bool {
+    let bytes = hora.as_bytes();
+    if bytes.len() != 5 || bytes[2] != b':' {
+        return false;
+    }
+    let h: u8 = match hora[0..2].parse() { Ok(v) => v, Err(_) => return false };
+    let m: u8 = match hora[3..5].parse() { Ok(v) => v, Err(_) => return false };
+    h <= 23 && m <= 59
+}
 
 static SYNCTHING_SERVICE: OnceLock<String> = OnceLock::new();
 
@@ -151,10 +165,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
     log::info!("Iniciando bot...");
     let bot = Bot::new(token);
+
+    // --- Inicializar base de datos de recordatorios ---
+    let dir_bd = "/var/lib/BotLelegram";
+    std::fs::create_dir_all(dir_bd).expect("No se pudo crear /var/lib/BotLelegram");
+    let ruta_bd = format!("{}/recordatorios.db3", dir_bd);
+    let conn_db = db::init_db(&ruta_bd).expect("No se pudo abrir la base de datos");
+    let conn_db = Arc::new(Mutex::new(conn_db));
+
     inicio(bot.clone(), chat.clone()).await;
     tokio::spawn(bateria(bot.clone(), chat.clone()));
     tokio::spawn(ssh(bot.clone(), chat.clone()));
-    MisComandos::repl(bot, answer).await;
+    // --- Tarea de recordatorios (cada minuto) ---
+    tokio::spawn(reminders::tarea_recordatorios(
+        bot.clone(),
+        chat,
+        Arc::clone(&conn_db),
+    ));
+
+    // Pasamos la conexión de BD al handler de comandos via dptree
+    let handler = dptree::entry()
+        .branch(Update::filter_message().filter_command::<MisComandos>().endpoint(
+            |bot: Bot, msg: Message, cmd: MisComandos, conn: Arc<Mutex<rusqlite::Connection>>| async move {
+                answer(bot, msg, cmd, conn).await
+            },
+        ));
+
+    Dispatcher::builder(bot, handler)
+        .dependencies(dptree::deps![conn_db])
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch()
+        .await;
+
     Ok(())
 }
 
@@ -171,13 +214,24 @@ enum MisComandos {
     PararSyncthing,
     #[command(description = "Arrancar syncthing")]
     ArrancarSyncthing,
-    #[command(description = "Parar Tailscale")]
+    #[command(description = "Reiniciar servidor")]
     Reiniciar,
     #[command(description = "Arrancar Tailscale")]
     ArrancarTailscale,
+    #[command(description = "Agregar recordatorio: /agregar_recordatorio HH:MM mensaje")]
+    AgregarRecordatorio { hora_y_mensaje: String },
+    #[command(description = "Listar recordatorios activos")]
+    ListarRecordatorios,
+    #[command(description = "Eliminar recordatorio por id: /eliminar_recordatorio <id>")]
+    EliminarRecordatorio { id: String },
 }
 
-async fn answer(bot: Bot, msg: Message, cmd: MisComandos) -> ResponseResult<()> {
+async fn answer(
+    bot: Bot,
+    msg: Message,
+    cmd: MisComandos,
+    conn: Arc<Mutex<rusqlite::Connection>>,
+) -> ResponseResult<()> {
     let mut payload = String::from("Estado de servicios:\n");
     match cmd {
         MisComandos::Estado => {
@@ -256,7 +310,7 @@ async fn answer(bot: Bot, msg: Message, cmd: MisComandos) -> ResponseResult<()> 
             }
         }
         MisComandos::Reiniciar => {
-            let child = Command::new("sudo")
+            let _child = Command::new("sudo")
                 .args(&["reboot"])
                 .stdout(Stdio::piped())
                 .status()
@@ -276,13 +330,132 @@ async fn answer(bot: Bot, msg: Message, cmd: MisComandos) -> ResponseResult<()> 
             // arranca si esta detenido
             if status_str.contains("stopped") {
                 log::info!("Tailscale apagado. Arrancando...");
-                let child = Command::new("sudo")
+                let _child = Command::new("sudo")
                     .args(&["tailscale", "up"])
                     .status()
                     .await;
             } else {
                 log::info!("Servicio ya está conectado.");
-                // Mensaje a Telegram: Ya está corriendo
+            }
+        }
+
+        // ---- Recordatorios ----
+        MisComandos::AgregarRecordatorio { hora_y_mensaje } => {
+            let partes: Vec<&str> = hora_y_mensaje.trim().splitn(2, ' ').collect();
+            if partes.len() < 2 || partes[1].trim().is_empty() {
+                bot.send_message(
+                    msg.chat.id,
+                    "❌ Uso: /agregar_recordatorio HH:MM mensaje\nEjemplo: /agregar_recordatorio 14:30 Reunión con Juan",
+                )
+                .protect_content(true)
+                .await?;
+            } else {
+                let hora = partes[0].to_string();
+                let mensaje = partes[1].trim().to_string();
+                if !validar_hora(&hora) {
+                    bot.send_message(
+                        msg.chat.id,
+                        "❌ Hora inválida. Usá el formato HH:MM en 24h (ej: 08:30, 14:00).",
+                    )
+                    .protect_content(true)
+                    .await?;
+                } else {
+                    // Operación de BD: obtener resultado y soltar el guard antes del .await
+                    let resultado = {
+                        let guard = conn.lock().await;
+                        db::agregar(&guard, &hora, &mensaje)
+                    };
+                    match resultado {
+                        Ok(id) => {
+                            bot.send_message(
+                                msg.chat.id,
+                                format!("✅ Recordatorio agregado (id: {}) — se disparará todos los días a las {} UTC-3.", id, hora),
+                            )
+                            .protect_content(true)
+                            .await?;
+                        }
+                        Err(e) => {
+                            log::error!("Error guardando recordatorio: {}", e);
+                            bot.send_message(msg.chat.id, "❌ Error al guardar el recordatorio.")
+                                .protect_content(true)
+                                .await?;
+                        }
+                    }
+                }
+            }
+        }
+
+        MisComandos::ListarRecordatorios => {
+            // Soltar el guard antes del .await
+            let resultado = {
+                let guard = conn.lock().await;
+                db::listar(&guard)
+            };
+            match resultado {
+                Ok(lista) if lista.is_empty() => {
+                    bot.send_message(msg.chat.id, "📭 No hay recordatorios activos.")
+                        .protect_content(true)
+                        .await?;
+                }
+                Ok(lista) => {
+                    let mut texto = String::from("📋 Recordatorios activos:\n");
+                    for rec in &lista {
+                        texto.push_str(&format!("  #{} {} — {}\n", rec.id, rec.hora, rec.mensaje));
+                    }
+                    bot.send_message(msg.chat.id, texto)
+                        .protect_content(true)
+                        .await?;
+                }
+                Err(e) => {
+                    log::error!("Error listando recordatorios: {}", e);
+                    bot.send_message(msg.chat.id, "❌ Error al leer los recordatorios.")
+                        .protect_content(true)
+                        .await?;
+                }
+            }
+        }
+
+        MisComandos::EliminarRecordatorio { id } => {
+            match id.trim().parse::<i64>() {
+                Err(_) => {
+                    bot.send_message(
+                        msg.chat.id,
+                        "❌ ID inválido. Usá un número entero: /eliminar_recordatorio 3",
+                    )
+                    .protect_content(true)
+                    .await?;
+                }
+                Ok(id_num) => {
+                    // Soltar el guard antes del .await
+                    let resultado = {
+                        let guard = conn.lock().await;
+                        db::eliminar(&guard, id_num)
+                    };
+                    match resultado {
+                        Ok(true) => {
+                            bot.send_message(
+                                msg.chat.id,
+                                format!("🗑️ Recordatorio #{} eliminado.", id_num),
+                            )
+                            .protect_content(true)
+                            .await?;
+                        }
+                        Ok(false) => {
+                            bot.send_message(
+                                msg.chat.id,
+                                format!("❌ No existe un recordatorio con id {}.", id_num),
+                            )
+                            .protect_content(true)
+                            .await?;
+                        }
+                        Err(e) => {
+                            log::error!("Error eliminando recordatorio {}: {}", id_num, e);
+                            bot.send_message(msg.chat.id, "❌ Error al eliminar el recordatorio.")
+                                .protect_content(true)
+                                .await?;
+                        }
+                    }
+                }
             }
         }
     };

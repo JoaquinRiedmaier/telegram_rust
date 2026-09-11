@@ -1,2 +1,5 @@
 /target
 .env
+skills-lock.json
+.opencode/
+.agents/skills/agent-browser/
