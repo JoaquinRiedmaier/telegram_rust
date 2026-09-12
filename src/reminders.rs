@@ -1,11 +1,11 @@
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use teloxide::prelude::*;
+use tokio::sync::Mutex;
 use tokio::time;
 
 use crate::db;
 
-const MENSAJE_8AM: &str = "⏰ Son las 8 de la mañana. ¡A comenzar el día!";
+const MENSAJE_8AM: &str = "Quem faz dinheiro deitada e a putaaaaa🤪🤪";
 
 /// Obtiene la hora actual en UTC-3 con formato "HH:MM".
 fn hora_utc3() -> String {

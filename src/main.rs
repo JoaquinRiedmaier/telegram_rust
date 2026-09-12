@@ -222,7 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // Seccion mensajes
 #[derive(BotCommands, Clone)]
 #[command(
-    rename_rule = "lowercase",
+    rename_rule = "snake_case",
     description = "These commands are supported:"
 )]
 enum MisComandos {
@@ -236,12 +236,12 @@ enum MisComandos {
     Reiniciar,
     #[command(description = "Arrancar Tailscale")]
     ArrancarTailscale,
-    #[command(description = "Agregar recordatorio: /agregar_recordatorio HH:MM mensaje")]
-    AgregarRecordatorio { hora_y_mensaje: String },
+    #[command(description = "Agregar recordatorio: /aggrec HH:MM mensaje")]
+    Aggrec { hora_y_mensaje: String },
     #[command(description = "Listar recordatorios activos")]
-    ListarRecordatorios,
-    #[command(description = "Eliminar recordatorio por id: /eliminar_recordatorio <id>")]
-    EliminarRecordatorio { id: String },
+    Listrec,
+    #[command(description = "Eliminar recordatorio por id: /elimrec <id>")]
+    Elimrec { id: String },
 }
 
 async fn answer(
@@ -366,12 +366,12 @@ async fn answer(
         }
 
         // ---- Recordatorios ----
-        MisComandos::AgregarRecordatorio { hora_y_mensaje } => {
+        MisComandos::Aggrec { hora_y_mensaje } => {
             let partes: Vec<&str> = hora_y_mensaje.trim().splitn(2, ' ').collect();
             if partes.len() < 2 || partes[1].trim().is_empty() {
                 bot.send_message(
                     msg.chat.id,
-                    "❌ Uso: /agregar_recordatorio HH:MM mensaje\nEjemplo: /agregar_recordatorio 14:30 Reunión con Juan",
+                    "❌ Uso: /aggrec HH:MM mensaje\nEjemplo: /aggrec 14:30 Reunión con Juan",
                 )
                 .protect_content(true)
                 .await?;
@@ -411,7 +411,7 @@ async fn answer(
             }
         }
 
-        MisComandos::ListarRecordatorios => {
+        MisComandos::Listrec => {
             // Soltar el guard antes del .await
             let resultado = {
                 let guard = conn.lock().await;
@@ -441,12 +441,12 @@ async fn answer(
             }
         }
 
-        MisComandos::EliminarRecordatorio { id } => {
+        MisComandos::Elimrec { id } => {
             match id.trim().parse::<i64>() {
                 Err(_) => {
                     bot.send_message(
                         msg.chat.id,
-                        "❌ ID inválido. Usá un número entero: /eliminar_recordatorio 3",
+                        "❌ ID inválido. Usá un número entero: /elimrec 3",
                     )
                     .protect_content(true)
                     .await?;
