@@ -6,11 +6,11 @@ use std::env; //Para archivo .env
 use std::fs;
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
-use tokio::sync::Mutex;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands; // Agora sim, le vamos a mandar mensajitos
 use tokio::io::{AsyncBufReadExt, BufReader}; // Para leer línea por línea
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time;
 
 /// Valida "HH:MM" en 24h sin depender de la crate `regex`.
@@ -19,8 +19,14 @@ fn validar_hora(hora: &str) -> bool {
     if bytes.len() != 5 || bytes[2] != b':' {
         return false;
     }
-    let h: u8 = match hora[0..2].parse() { Ok(v) => v, Err(_) => return false };
-    let m: u8 = match hora[3..5].parse() { Ok(v) => v, Err(_) => return false };
+    let h: u8 = match hora[0..2].parse() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let m: u8 = match hora[3..5].parse() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
     h <= 23 && m <= 59
 }
 
@@ -174,6 +180,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn_db = Arc::new(Mutex::new(conn_db));
 
     inicio(bot.clone(), chat.clone()).await;
+
+    let _ = bot
+        .set_my_commands(MisComandos::bot_commands())
+        .await
+        .log_on_error();
+
     tokio::spawn(bateria(bot.clone(), chat.clone()));
     tokio::spawn(ssh(bot.clone(), chat.clone()));
     // --- Tarea de recordatorios (cada minuto) ---
@@ -184,12 +196,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // Pasamos la conexión de BD al handler de comandos via dptree
-    let handler = dptree::entry()
-        .branch(Update::filter_message().filter_command::<MisComandos>().endpoint(
-            |bot: Bot, msg: Message, cmd: MisComandos, conn: Arc<Mutex<rusqlite::Connection>>| async move {
-                answer(bot, msg, cmd, conn).await
-            },
-        ));
+    let handler = dptree::entry().branch(
+        Update::filter_message()
+            .filter_command::<MisComandos>()
+            .endpoint(
+                |bot: Bot,
+                 msg: Message,
+                 cmd: MisComandos,
+                 conn: Arc<Mutex<rusqlite::Connection>>| async move {
+                    answer(bot, msg, cmd, conn).await
+                },
+            ),
+    );
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![conn_db])
@@ -235,7 +253,11 @@ async fn answer(
     let mut payload = String::from("Estado de servicios:\n");
     match cmd {
         MisComandos::Estado => {
-            let status = chequeo_servicio("syncthing", &["is-active", get_syncthing_service()].as_slice()).await;
+            let status = chequeo_servicio(
+                "syncthing",
+                &["is-active", get_syncthing_service()].as_slice(),
+            )
+            .await;
             payload.push_str(&status.unwrap_or_default());
             let output = Command::new("tailscale")
                 .arg("status")
@@ -259,7 +281,11 @@ async fn answer(
             }
         }
         MisComandos::PararSyncthing => {
-            let status = chequeo_servicio("syncthing", &["is-active", get_syncthing_service()].as_slice()).await;
+            let status = chequeo_servicio(
+                "syncthing",
+                &["is-active", get_syncthing_service()].as_slice(),
+            )
+            .await;
             match status {
                 Ok(status) => {
                     if status.contains("Corriendo") {
